@@ -723,10 +723,33 @@ function openViewer(list, index) {
     $("#v-dis", v).classList.toggle("on", it.like === false);
     if (it.video) {
       const vid = el(`<video controls playsinline preload="metadata"></video>`);
-      vid.src = "media/" + it.id;
-      if (thumbs.urls.get(it.id + "@1600")) vid.poster = thumbs.urls.get(it.id + "@1600");
-      stage.append(vid);
-      vid.play().catch(() => {});
+      const poster = thumbs.urls.get(it.id + "@1200") || thumbs.urls.get(it.id + "@400");
+      if (poster) vid.poster = poster;
+      const spin = el(`<div class="spinner"></div>`);
+      stage.append(vid, spin);
+      const stillHere = () => vid.isConnected;
+      vid.addEventListener("playing", () => spin.remove());
+      vid.addEventListener("loadeddata", () => spin.remove());
+      // Plan B: download the whole video, then play it from the phone's memory.
+      let triedWhole = false;
+      const playWhole = async () => {
+        if (triedWhole || !stillHere()) return;
+        triedWhole = true;
+        try {
+          const r = await fetch(`https://www.googleapis.com/drive/v3/files/${it.id}?alt=media`, { headers: { Authorization: "Bearer " + auth.token } });
+          if (!r.ok) throw new Error("Drive said " + r.status);
+          const blob = new Blob([await r.blob()], { type: it.mime === "video/quicktime" ? "video/quicktime" : "video/mp4" });
+          if (!stillHere()) return;
+          vid.src = URL.createObjectURL(blob);
+          vid.play().catch(() => {});
+        } catch (e) { spin.remove(); if (stillHere()) toast("Couldn't play this video: " + e.message); }
+      };
+      vid.addEventListener("error", playWhole);
+      if (navigator.serviceWorker?.controller) {
+        // Streams through the service worker, which adds the sign-in and handles skipping through.
+        vid.src = `media/${it.id}?size=${it.size || 0}&type=${encodeURIComponent(it.mime)}`;
+        vid.play().catch(() => {});
+      } else playWhole();
     } else {
       const poster = lazyImg(it, 1600, "poster");
       const spin = el(`<div class="spinner"></div>`);
