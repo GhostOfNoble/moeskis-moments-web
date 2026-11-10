@@ -128,3 +128,13 @@ main { padding: calc(var(--safe-top) + 118px) 8px calc(var(--safe-bottom) + 110p
 .list .item .s { color: var(--muted); font-size: 14px; }
 .list .item .grow { flex: 1; }
 .small-print { color: var(--muted); font-size: 13px; margin: 18px 10px; }
+
+.banner { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; background: var(--card); border-radius: 20px; padding: 14px 16px; margin-bottom: 12px; }
+.banner .t { font-weight: 600; }
+.banner .s, .list .item .s { color: var(--muted); font-size: 14px; }
+.banner .grow { flex: 1; }
+svg.chev { transform: rotate(-90deg); color: var(--muted); }
+/* Turned photos (a note on the file; the file itself is untouched). */
+.rot90 img, .rot90 video { transform: rotate(90deg); } .rot180 img, .rot180 video { transform: rotate(180deg); } .rot270 img, .rot270 video { transform: rotate(270deg); }
+.cover.rot90 img, .cover.rot270 img { scale: 1.09; }
+.viewer .stage.rot90 img, .viewer .stage.rot90 video, .viewer .stage.rot270 img, .viewer .stage.rot270 video { max-width: 100vh; max-height: 100vw; }

@@ -4,6 +4,8 @@
 
 const CFG = window.MOESKI_CONFIG || {};
 const SCOPE = "https://www.googleapis.com/auth/drive.file";
+// Wider access, asked for only when bringing in photos added to the folder some other way (e.g. the Drive app).
+const WIDE = "https://www.googleapis.com/auth/drive";
 const API = "https://www.googleapis.com/drive/v3";
 const REDIRECT = location.origin + location.pathname.replace(/index\.html$/, "");
 const GRID = 12, MIN_SIMILARITY = 0.88, WINDOW_MS = 3 * 60 * 1000;
@@ -58,11 +60,12 @@ const auth = {
   get token() { const a = store.get("auth"); return a && a.exp > Date.now() + 60_000 ? a.token : null; },
   get minutesLeft() { const a = store.get("auth"); return a ? Math.floor((a.exp - Date.now()) / 60000) : 0; },
   /** Goes to Google and comes back here. [silent] tries without asking again (works while still signed in to Google). */
-  signIn(silent = false) {
+  get hasWide() { const a = store.get("auth"); return !!a?.scope?.split(" ").includes(WIDE); },
+  signIn(silent = false, extra = null) {
     if (!CFG.clientId) { toast("The web sign-in isn't set up yet (no client ID)."); return; }
     sessionStorage.setItem("moeski.return", JSON.stringify({ tab: ui.tab, scroll: scrollY }));
     const p = new URLSearchParams({
-      client_id: CFG.clientId, redirect_uri: REDIRECT, response_type: "token", scope: SCOPE,
+      client_id: CFG.clientId, redirect_uri: REDIRECT, response_type: "token", scope: extra ? SCOPE + " " + extra : SCOPE,
       include_granted_scopes: "true", state: silent ? "silent" : "ask",
     });
     const hint = store.get("email");
@@ -76,7 +79,7 @@ const auth = {
     const h = new URLSearchParams(location.hash.slice(1));
     history.replaceState(null, "", location.pathname);
     if (h.get("access_token")) {
-      store.set("auth", { token: h.get("access_token"), exp: Date.now() + (Number(h.get("expires_in")) || 3600) * 1000 });
+      store.set("auth", { token: h.get("access_token"), exp: Date.now() + (Number(h.get("expires_in")) || 3600) * 1000, scope: h.get("scope") || "" });
       return "ok";
     }
     if (h.get("error")) return h.get("error");
@@ -115,7 +118,7 @@ async function findFolder() {
   return id;
 }
 
-const FIELDS = "id,name,mimeType,thumbnailLink,appProperties,createdTime,size,md5Checksum,imageMediaMetadata(width,height,rotation),videoMediaMetadata(durationMillis,width,height)";
+const FIELDS = "id,name,mimeType,thumbnailLink,appProperties,createdTime,size,md5Checksum,modifiedTime,imageMediaMetadata(width,height,rotation,time),videoMediaMetadata(durationMillis,width,height)";
 
 function toItem(f) {
   const p = f.appProperties || {};
@@ -127,20 +130,27 @@ function toItem(f) {
     video: (f.mimeType || "").startsWith("video/"), montage: p.kind === "montage", autoFor: p.autoFor || null,
     fav: p.fav === "1", like: p.like === "1" ? true : p.like === "0" ? false : null,
     duration: Number(f.videoMediaMetadata?.durationMillis) || 0,
+    rot: ((Number(p.rot) || 0) % 360 + 360) % 360,
   };
 }
 
 async function listAll(folder) {
-  const out = [];
+  const out = [], outside = [];
   let page = null;
   do {
     const q = new URLSearchParams({ q: `'${folder}' in parents and trashed=false`, pageSize: "1000", fields: "nextPageToken,files(" + FIELDS + ")", spaces: "drive" });
     if (page) q.set("pageToken", page);
     const r = await api("/files?" + q);
-    out.push(...(r.files || []).filter((f) => f.mimeType !== "application/vnd.google-apps.folder").map(toItem));
+    for (const f of r.files || []) {
+      if (!/^(image|video)\//.test(f.mimeType || "")) continue;
+      // Files this app made always carry its notes; ones without were added some other way (only visible with wider access).
+      if (!f.appProperties || !Object.keys(f.appProperties).length) outside.push(f);
+      else out.push(toItem(f));
+    }
     page = r.nextPageToken;
   } while (page);
   out.sort((a, b) => b.takenAt - a.takenAt);
+  state.outside = outside;
   return out;
 }
 
@@ -387,8 +397,119 @@ async function uploadFiles(files) {
   setTimeout(() => refresh(true), 60_000);
 }
 
+// ---------- bringing in photos added to the folder some other way ----------
+/** Bytes [a..b] of a Drive file. */
+async function rangeBytes(id, a, b) {
+  const r = await fetch(`${API}/files/${id}?alt=media`, { headers: { Authorization: "Bearer " + auth.token, Range: `bytes=${a}-${b}` } });
+  if (!r.ok) throw new Error("Drive said " + r.status);
+  return r.arrayBuffer();
+}
+/** When a Drive file was taken, read from the file itself without downloading all of it. */
+async function remoteTakenAt(f) {
+  const size = Number(f.size) || 0;
+  const t = (x) => Date.parse(x) || Infinity;
+  let fallback = Math.min(t(f.modifiedTime), t(f.createdTime));
+  const meta = f.imageMediaMetadata?.time && /^(\d{4}):(\d{2}):(\d{2}) (\d{2}):(\d{2}):(\d{2})/.exec(f.imageMediaMetadata.time);
+  if (meta) fallback = new Date(+meta[1], +meta[2] - 1, +meta[3], +meta[4], +meta[5], +meta[6]).getTime();
+  if (!isFinite(fallback)) fallback = Date.now();
+  if (f.mimeType.startsWith("image/") && size) {
+    const head = await rangeBytes(f.id, 0, Math.min(size, 1 << 20) - 1);
+    return takenAt(new File([head], f.name, { type: f.mimeType, lastModified: fallback }));
+  }
+  const remote = { name: f.name, type: f.mimeType, size, lastModified: fallback,
+    slice: (a, b) => ({ arrayBuffer: () => rangeBytes(f.id, a, Math.min(b, size) - 1) }) };
+  return takenAt(remote);
+}
+/** The same 12×12 fingerprint uploads get, made from Drive's own preview of the photo. */
+async function remoteFingerprint(f) {
+  let blob = null;
+  if (f.thumbnailLink) {
+    const r = await fetch(f.thumbnailLink.replace(/=s\d+$/, "=s512"), { headers: { Authorization: "Bearer " + auth.token } }).catch(() => null);
+    if (r?.ok) blob = await r.blob();
+  }
+  if (!blob && Number(f.size) < 30e6) {
+    const r = await fetch(`${API}/files/${f.id}?alt=media`, { headers: { Authorization: "Bearer " + auth.token } });
+    if (r.ok) blob = await r.blob();
+  }
+  return blob ? fingerprint(blob).catch(() => null) : null;
+}
+
+/**
+ * Photos and videos put in the album's Drive folder some other way (like the Google Drive app on an iPhone)
+ * can't be seen by either app. This makes the app's own copy of each inside Drive (no downloading, full quality),
+ * with the same notes an upload gets, skips anything already in the album, then moves the originals to the bin.
+ */
+async function bringIn() {
+  if (!auth.hasWide) {
+    sessionStorage.setItem("moeski.resume", "bringIn");
+    const sheet = openSheet(`<div><h2>Allow access to the folder</h2>
+      <p>To see photos added outside the app, Google will ask you to let Moeski's Moments see your Google Drive. It only looks in the “${esc(CFG.folderName)}” folder.</p>
+      <p>Google may say the app isn't verified: tap <b>Advanced</b>, then <b>Go to Moeski's Moments</b>, and tick the Drive box if one is shown.</p>
+      <div class="row end"><button class="btn secondary" id="no">Not now</button><button class="btn" id="yes">Continue</button></div></div>`);
+    $("#no", sheet).onclick = () => { sessionStorage.removeItem("moeski.resume"); closeSheet(); };
+    $("#yes", sheet).onclick = () => auth.signIn(false, WIDE);
+    return;
+  }
+  if (auth.minutesLeft < 20) { sessionStorage.setItem("moeski.resume", "bringIn"); auth.signIn(true); return; }
+  toast("Looking in the folder…", 2000);
+  state.loading = false;
+  await refresh(true);
+  const todo = state.outside.slice();
+  if (!todo.length) { toast("Nothing to bring in. Everything in the folder is already in the album."); return; }
+  const folder = await findFolder();
+  const byMd5 = new Set(), photos = [];
+  for (const it of state.items) { if (it.md5) byMd5.add(it.md5); if (it.fp) photos.push(it); }
+  const sheet = openSheet(`<div><h2>Bringing in ${todo.length}</h2><p class="what">Getting ready…</p>
+    <div class="progress"><div></div></div><p class="detail small-print" style="margin:0"></p>
+    <p class="small-print" style="margin:12px 0 0">Copies are made inside Google Drive at full quality. Keep this open until it finishes; if it's interrupted, tap the button again and it carries on.</p></div>`, { closable: false });
+  const what = $(".what", sheet), bar = $(".progress > div", sheet), detail = $(".detail", sheet);
+  let lock = null; try { lock = await navigator.wakeLock?.request("screen"); } catch {}
+  let done = 0, added = 0, already = 0, failed = 0, next = 0;
+  const show = () => {
+    bar.style.width = (done / todo.length * 100).toFixed(1) + "%";
+    what.textContent = `${done} of ${todo.length}`;
+    detail.textContent = [added && `${added} added`, already && `${already} already in the album`, failed && `${failed} couldn't be added`].filter(Boolean).join(" · ");
+  };
+  const one = async (f) => {
+    const md5sum = f.md5Checksum || null;
+    if (md5sum && byMd5.has(md5sum)) { await trash(f.id); already++; return; }
+    const when = await remoteTakenAt(f);
+    const fp = f.mimeType.startsWith("image/") ? await remoteFingerprint(f) : null;
+    if (fp && photos.some((p) => Math.abs(p.takenAt - when) <= WINDOW_MS && similarity(fp, p.fp) >= MIN_SIMILARITY)) { await trash(f.id); already++; return; }
+    const props = { takenAt: String(when), app: "moeski", source: "import", ...(md5sum ? { md5: md5sum } : {}), ...(fp ? toProps(fp) : {}) };
+    const copy = await api(`/files/${f.id}/copy?fields=${encodeURIComponent(FIELDS)}`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: f.name, parents: [folder], appProperties: props }),
+    });
+    await trash(f.id);
+    const item = toItem(copy);
+    state.items.push(item); byId.set(item.id, item);
+    if (md5sum) byMd5.add(md5sum);
+    if (item.fp) photos.push(item);
+    added++;
+  };
+  const worker = async () => {
+    while (next < todo.length) {
+      const f = todo[next++];
+      try { await one(f); } catch (e) { failed++; console.warn("Couldn't bring in " + f.name, e); }
+      done++; show();
+    }
+  };
+  show();
+  await Promise.all([worker(), worker(), worker()]);
+  lock?.release?.();
+  sessionStorage.removeItem("moeski.resume");
+  state.items.sort((a, b) => b.takenAt - a.takenAt);
+  store.set("items", state.items);
+  state.outside = [];
+  what.textContent = failed ? "Finished, with some problems" : "Done";
+  if (failed) sheet.append(el(`<p class="small-print" style="margin:8px 0 0">Tap the button again to retry the ones that didn't work.</p>`));
+  sheet.append(el(`<div class="row end" style="margin-top:14px"><button class="btn">OK</button></div>`));
+  $(".btn", sheet).onclick = () => { closeSheet(); render(); };
+}
+
 // ---------- state ----------
-const state = { items: store.get("items", []), folder: null, loading: false, error: null };
+const state = { items: store.get("items", []), outside: [], folder: null, loading: false, error: null };
 const byId = new Map(state.items.map((i) => [i.id, i]));
 const ui = { tab: "album", kind: store.get("kind", "both"), show: store.get("show", "all"), cols: store.get("cols", 3), selecting: false, picked: new Set(), year: null };
 
@@ -513,6 +634,12 @@ function renderAlbum() {
   }
 
   const main = el(`<main></main>`);
+  if (state.outside.length && !ui.selecting) {
+    const n = state.outside.length;
+    const b = el(`<button class="banner"><div class="grow"><div class="t">${n} in the Drive folder ${n === 1 ? "isn't" : "aren't"} in the album yet</div><div class="s">Tap to bring ${n === 1 ? "it" : "them"} in</div></div>${svg("add")}</button>`);
+    b.onclick = bringIn;
+    main.append(b);
+  }
   if (!items.length) main.append(el(`<div class="empty">${state.items.length ? "Nothing matches this filter." : state.loading ? "Loading the album…" : "No photos yet. Tap + to add some."}</div>`));
   for (const k of keys) {
     const list = groups.get(k);
@@ -520,12 +647,12 @@ function renderAlbum() {
     const sec = el(`<section class="month" id="m${k}" data-k="${k}">
       <div class="cover"><div class="label"><div class="small">${Math.floor(k / 100)}${ageText(cover.takenAt) ? " · " + esc(ageText(cover.takenAt)) : ""}</div><div class="big">${MONTHS[k % 100]}</div></div></div>
       <div class="grid"></div></section>`);
-    const coverImg = lazyImg(cover, 1200); $(".cover", sec).prepend(coverImg);
+    const coverImg = lazyImg(cover, 1200); $(".cover", sec).prepend(coverImg); if (cover.rot) $(".cover", sec).classList.add("rot" + cover.rot);
     $(".cover", sec).onclick = () => (ui.selecting ? null : openViewer(items, items.indexOf(cover)));
     const grid = $(".grid", sec);
     for (const it of list) {
       if (it === cover) continue;
-      const t = el(`<div class="tile ${ui.picked.has(it.id) ? "picked" : ""}">${it.video ? `<span class="chip">${svg("video")}${fmtDur(it.duration)}</span>` : ""}${it.fav ? `<svg class="heart" viewBox="0 0 24 24" fill="#fff"><path d="${ICON.heart}"/></svg>` : ""}${ui.selecting ? `<span class="sel"></span>` : ""}</div>`);
+      const t = el(`<div class="tile ${ui.picked.has(it.id) ? "picked" : ""} ${it.rot ? "rot" + it.rot : ""}">${it.video ? `<span class="chip">${svg("video")}${fmtDur(it.duration)}</span>` : ""}${it.fav ? `<svg class="heart" viewBox="0 0 24 24" fill="#fff"><path d="${ICON.heart}"/></svg>` : ""}${ui.selecting ? `<span class="sel"></span>` : ""}</div>`);
       t.prepend(lazyImg(it, 400));
       t.onclick = () => {
         if (ui.selecting) { ui.picked.has(it.id) ? ui.picked.delete(it.id) : ui.picked.add(it.id); t.classList.toggle("picked"); $(".topbar .grow span")?.replaceChildren(document.createTextNode(ui.picked.size ? ui.picked.size + " selected" : "Select items")); renderSelectionTray(); }
@@ -618,6 +745,7 @@ function renderSettings() {
     <div class="list">
       <div class="item"><div class="grow"><div class="t">${state.items.filter((i) => !i.montage).length} photos and videos</div><div class="s">In the “${esc(CFG.folderName)}” folder in Google Drive</div></div><button class="round glass" id="reload" aria-label="Reload">${svg("refresh")}</button></div>
       <div class="item"><div class="grow"><div class="t">${esc(CFG.childName)}'s birthday</div><div class="s">For the age under each month. Kept on this phone only.</div></div><input type="date" id="bday" value="${esc(store.get("birthday") || "")}" style="background:var(--card-2);color:var(--text);border:0;border-radius:10px;padding:8px"></div>
+      <button class="item" id="bring" style="text-align:left;width:100%"><div class="grow"><div class="t">Bring in photos added outside the app</div><div class="s">${state.outside.length ? state.outside.length + " in the Drive folder aren't in the album yet" : "For photos and videos put in the Drive folder another way, like the Google Drive app"}</div></div>${svg("down", "i chev")}</button>
     </div>
     <div class="section-title" style="font-size:13px;color:var(--muted);text-transform:uppercase;letter-spacing:.08em">Account</div>
     <div class="list">
@@ -629,6 +757,7 @@ function renderSettings() {
   $("#reload", main).onclick = () => { store.del("folder"); refresh(); toast("Reloading the album…"); };
   $("#bday", main).onchange = (e) => { store.set("birthday", e.target.value || null); };
   $("#out", main).onclick = () => auth.signOut();
+  $("#bring", main).onclick = bringIn;
   api("/about?fields=user(emailAddress,displayName)").then((r) => { const e = r?.user?.emailAddress; if (e) { store.set("email", e); $("#who", main).textContent = e; } }).catch(() => {});
   root.append(main);
 }
@@ -716,6 +845,7 @@ function openViewer(list, index) {
     const it = list[i];
     stage.innerHTML = "";
     stage.style.transform = "";
+    stage.className = "stage" + (it.rot ? " rot" + it.rot : "");
     const d = new Date(it.takenAt);
     $(".when", v).textContent = d.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "long", year: "numeric" }) + ", " + d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
     $("#v-fav", v).className = "fav" + (it.fav ? " on" : ""); $("#v-fav", v).innerHTML = svg(it.fav ? "heart" : "heartO") + "Favourite";
@@ -845,6 +975,7 @@ document.addEventListener("gesturechange", (e) => {
   render();
   if (ret?.scroll) requestAnimationFrame(() => scrollTo(0, ret.scroll));
   await refresh();
+  if (sessionStorage.getItem("moeski.resume") === "bringIn") bringIn();
   // Renew the access quietly before it runs out, if the app is left open.
   setInterval(() => { if (auth.minutesLeft < 5 && !document.querySelector(".sheet")) auth.signIn(true); }, 60_000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) { if (!auth.token) auth.signIn(true); else refresh(true); } });

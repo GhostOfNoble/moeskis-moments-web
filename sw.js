@@ -1,6 +1,6 @@
 // Service worker: keeps the app itself available offline, and plays videos from Google Drive by adding the
 // signed-in person's access to each request (a <video> can't do that by itself), including seeking.
-const SHELL = "moeski-shell-v2";
+const SHELL = "moeski-shell-v3";
 const FILES = ["./", "index.html", "style.css", "app.js", "config.js", "manifest.webmanifest",
   "vendor/spark-md5.min.js", "vendor/exifr.lite.umd.js", "icons/icon-192.png", "icons/apple-touch-icon.png"];
 
