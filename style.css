@@ -38,7 +38,8 @@ svg.i { width: 22px; height: 22px; fill: currentColor; flex: none; }
 .months { display: flex; gap: 2px; padding: 4px; border-radius: 26px; overflow-x: auto; scrollbar-width: none; align-self: center; max-width: 100%; }
 .months::-webkit-scrollbar { display: none; }
 .months button { padding: 8px 14px; border-radius: 20px; font-weight: 600; font-size: 15px; white-space: nowrap; }
-.months button.on { background: #fff; color: #000; }
+.months button { color: var(--muted); }
+.months button.on { background: rgba(255,255,255,.1); color: var(--text); }
 
 .nav { position: fixed; left: 12px; right: 12px; bottom: calc(var(--safe-bottom) + 12px); z-index: 20; display: flex; gap: 10px; align-items: center; }
 .nav .tabs { flex: 1; height: 64px; border-radius: 32px; display: flex; padding: 6px; }

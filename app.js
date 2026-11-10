@@ -722,7 +722,9 @@ function renderMemories() {
   const strip = el(`<div class="strip"></div>`);
   montages.forEach((m, i) => {
     const t = el(`<div class="card-tile"><div class="tile"><span class="chip">${svg("video")}${fmtDur(m.duration)}</span></div><div class="name">${esc(m.name.replace(/\.mp4$/i, "").replace(/^.*? – /, ""))}</div></div>`);
-    $(".tile", t).prepend(lazyImg(m, 600));
+    const img = el(`<img alt="" class="ready">`);
+    $(".tile", t).prepend(img);
+    montageCover(m, img);
     t.onclick = () => openViewer(montages, i);
     strip.append(t);
   });
@@ -826,6 +828,61 @@ async function shareItems(items) {
   } catch (e) { if (e.name !== "AbortError") toast("Couldn't share: " + e.message); }
 }
 
+// ---------- montage covers ----------
+// Drive's own preview of a montage is its first frame, which fades in from black. Like the Android app, take the
+// brightest of a few frames from inside the film instead (only the bits of the video needed are fetched), and keep it.
+const covers = {
+  urls: new Map(),
+  queue: Promise.resolve(),
+};
+function montageCover(item, img) {
+  const key = "mcover-" + item.id;
+  const show = (url) => { covers.urls.set(item.id, url); img.src = url; };
+  if (covers.urls.has(item.id)) return show(covers.urls.get(item.id));
+  // Drive's preview first (better than nothing), then the proper cover once it's made.
+  thumbs.load(item, img, 600);
+  covers.queue = covers.queue.then(async () => {
+    try {
+      const c = await caches.open("moeski-covers-v1");
+      const hit = await c.match(key);
+      if (hit) return show(URL.createObjectURL(await hit.blob()));
+      if (!navigator.serviceWorker?.controller) return;
+      const blob = await brightestFrame(item);
+      if (!blob) return;
+      await c.put(key, new Response(blob)).catch(() => {});
+      show(URL.createObjectURL(blob));
+    } catch {}
+  });
+}
+async function brightestFrame(item) {
+  const v = document.createElement("video");
+  v.muted = true; v.playsInline = true; v.preload = "auto"; v.crossOrigin = "anonymous";
+  v.src = `media/${item.id}?size=${item.size || 0}&type=${encodeURIComponent(item.mime)}`;
+  const once = (ev, ms = 15000) => new Promise((res, rej) => { const t = setTimeout(() => rej(new Error("timeout")), ms); v.addEventListener(ev, () => { clearTimeout(t); res(); }, { once: true }); });
+  try {
+    await once("loadedmetadata");
+    // iPhones only hand over frames once playback has started; start and stop it straight away (it's muted).
+    await v.play().catch(() => {}); v.pause();
+    const dur = v.duration || item.duration / 1000 || 0;
+    const times = [1.5, 2.5, dur / 3, dur / 2].filter((t) => t > 0 && t < dur);
+    const s = Math.min(1, 720 / Math.max(v.videoWidth || 720, v.videoHeight || 720));
+    const cv = document.createElement("canvas");
+    cv.width = Math.max(1, Math.round((v.videoWidth || 720) * s)); cv.height = Math.max(1, Math.round((v.videoHeight || 1280) * s));
+    const ctx = cv.getContext("2d", { willReadFrequently: true });
+    let best = null, bestLight = -1;
+    for (const t of times) {
+      v.currentTime = t;
+      await once("seeked");
+      ctx.drawImage(v, 0, 0, cv.width, cv.height);
+      const px = ctx.getImageData(0, 0, cv.width, cv.height).data;
+      let sum = 0; for (let i = 0; i < px.length; i += 16) sum += px[i] * 0.299 + px[i + 1] * 0.587 + px[i + 2] * 0.114;
+      const light = sum / (px.length / 16);
+      if (light > bestLight) { bestLight = light; best = await new Promise((r) => cv.toBlob(r, "image/jpeg", 0.88)); }
+    }
+    return bestLight > 12 ? best : null; // never keep a black frame
+  } catch { return null; } finally { v.removeAttribute("src"); v.load(); }
+}
+
 // ---------- the photo / video viewer ----------
 function openViewer(list, index) {
   if (index < 0) return;
@@ -853,7 +910,7 @@ function openViewer(list, index) {
     $("#v-dis", v).classList.toggle("on", it.like === false);
     if (it.video) {
       const vid = el(`<video controls playsinline preload="metadata"></video>`);
-      const poster = thumbs.urls.get(it.id + "@1200") || thumbs.urls.get(it.id + "@400");
+      const poster = (it.montage && covers.urls.get(it.id)) || thumbs.urls.get(it.id + "@1200") || thumbs.urls.get(it.id + "@400");
       if (poster) vid.poster = poster;
       const spin = el(`<div class="spinner"></div>`);
       stage.append(vid, spin);
