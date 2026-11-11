@@ -9,7 +9,7 @@ const WIDE = "https://www.googleapis.com/auth/drive";
 const API = "https://www.googleapis.com/drive/v3";
 const REDIRECT = location.origin + location.pathname.replace(/index\.html$/, "");
 const GRID = 12, MIN_SIMILARITY = 0.88, WINDOW_MS = 3 * 60 * 1000;
-const VERSION = "1.0";
+const VERSION = "1.1";
 
 // ---------- small helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -186,6 +186,7 @@ const thumbs = {
     const hit = await c.match(key);
     if (hit) { const u = URL.createObjectURL(await hit.blob()); this.urls.set(key, u); img.src = u; return; }
     const tryModes = this.mode ? [this.mode] : ["auth", "img", "media"];
+    if (!item.thumb && item.video) return ownPicture(item, img);
     for (const mode of tryModes) {
       const blob = await this.via(mode, item, px).catch(() => null);
       if (blob === "img") { if (!this.mode) { this.mode = "img"; store.set("thumbMode", "img"); } img.src = this.sized(item, px); return; }
@@ -195,6 +196,8 @@ const thumbs = {
         const u = URL.createObjectURL(blob); this.urls.set(key, u); img.src = u; return;
       }
     }
+    // Drive has no picture for this video (yet): make one from inside it, like the Android app.
+    if (item.video) ownPicture(item, img);
   },
   async via(mode, item, px) {
     if (mode === "auth") {
@@ -513,11 +516,12 @@ const state = { items: store.get("items", []), outside: [], folder: null, loadin
 const byId = new Map(state.items.map((i) => [i.id, i]));
 const ui = { tab: "album", kind: store.get("kind", "both"), show: store.get("show", "all"), cols: store.get("cols", 3), selecting: false, picked: new Set(), year: null };
 
-function visible() {
-  return state.items.filter((i) => !i.montage
-    && (ui.kind === "both" || (ui.kind === "videos") === i.video)
-    && (ui.show === "all" || (ui.show === "liked" && i.like === true) || (ui.show === "fav" && i.fav) || (ui.show === "disliked" && i.like === false) || (ui.show === "unsorted" && i.like == null)));
+function keep(i, f) {
+  return (f.kind === "both" || (f.kind === "videos") === i.video)
+    && (f.show === "all" || (f.show === "liked" && i.like === true) || (f.show === "fav" && i.fav) || (f.show === "disliked" && i.like === false) || (f.show === "unsorted" && i.like == null));
 }
+// The album shows photos and videos; montages live in Memories.
+function visible() { return state.items.filter((i) => !i.montage && keep(i, ui)); }
 function ageText(t) {
   const b = store.get("birthday"); if (!b) return null;
   const born = new Date(b + "T00:00:00"), d = new Date(t);
@@ -614,9 +618,9 @@ function renderAlbum() {
   const top = el(`<div class="topbar">
     <div class="toprow">
       ${ui.selecting ? `<button class="pill glass" id="cancel">Cancel</button><div class="grow"><span class="pill glass">${ui.picked.size ? ui.picked.size + " selected" : "Select items"}</span></div><button class="pill glass" id="all">All</button>`
-        : `<button class="pill glass" id="select">Select</button>
+        : `<span class="spacer2"></span>
       <div class="grow"><button class="pill glass" id="year">${ui.year}${years.length > 1 ? svg("down") : ""}</button></div>
-      <button class="round glass" id="filter" aria-label="Show">${svg(ui.kind === "videos" ? "video" : ui.kind === "photos" ? "photo" : ui.show === "fav" ? "heart" : ui.show === "liked" ? "up" : "filter")}</button>
+      <button class="round glass ${filtering() ? "dot" : ""}" id="filter" aria-label="Filter">${svg("filter")}</button>
       <button class="round glass" id="settings" aria-label="Settings">${svg("settings")}</button>`}
     </div>
     ${ui.selecting ? "" : `<div class="months glass" id="months">${keys.filter((k) => Math.floor(k / 100) === ui.year).map((k) => `<button data-k="${k}">${SHORT[k % 100]}</button>`).join("")}</div>`}
@@ -626,11 +630,19 @@ function renderAlbum() {
     $("#cancel", top).onclick = () => { ui.selecting = false; ui.picked.clear(); render(); };
     $("#all", top).onclick = () => { items.forEach((i) => ui.picked.add(i.id)); render(); };
   } else {
-    $("#select", top).onclick = () => { ui.selecting = true; ui.picked.clear(); render(); };
     $("#settings", top).onclick = () => { ui.tab = "settings"; scrollTo(0, 0); render(); };
     $("#filter", top).onclick = (e) => filterMenu(e.currentTarget);
     $("#year", top).onclick = (e) => years.length > 1 && openMenu(e.currentTarget, years.map((y) => ({ label: String(y), on: y === ui.year, run: () => { ui.year = y; const k = keys.find((x) => Math.floor(x / 100) === y); render(); document.getElementById("m" + k)?.scrollIntoView(); } })));
-    top.querySelectorAll("#months button").forEach((b) => (b.onclick = () => document.getElementById("m" + b.dataset.k)?.scrollIntoView({ behavior: "smooth" })));
+    // Tapping a month: it lights up straight away and the capsule holds still while the album scrolls there.
+    top.querySelectorAll("#months button").forEach((b) => (b.onclick = () => {
+      top.querySelectorAll("#months button").forEach((x) => x.classList.toggle("on", x === b));
+      ui.pinned = Date.now() + 1200;
+      const sec = document.getElementById("m" + b.dataset.k);
+      if (!sec) return;
+      const far = Math.abs(sec.getBoundingClientRect().top) > innerHeight * 3;
+      if (far) scrollTo(0, sec.offsetTop + (sec.offsetTop > scrollY ? -innerHeight : innerHeight));
+      sec.scrollIntoView({ behavior: "smooth" });
+    }));
   }
 
   const main = el(`<main></main>`);
@@ -648,16 +660,23 @@ function renderAlbum() {
       <div class="cover"><div class="label"><div class="small">${Math.floor(k / 100)}${ageText(cover.takenAt) ? " · " + esc(ageText(cover.takenAt)) : ""}</div><div class="big">${MONTHS[k % 100]}</div></div></div>
       <div class="grid"></div></section>`);
     const coverImg = lazyImg(cover, 1200); $(".cover", sec).prepend(coverImg); if (cover.rot) $(".cover", sec).classList.add("rot" + cover.rot);
-    $(".cover", sec).onclick = () => (ui.selecting ? null : openViewer(items, items.indexOf(cover)));
+    const coverEl = $(".cover", sec);
+    if (ui.selecting) { coverEl.classList.toggle("picked", ui.picked.has(cover.id)); coverEl.append(el(`<span class="sel big"></span>`)); }
+    coverEl.onclick = () => {
+      if (ui.selecting) { togglePick(cover.id); coverEl.classList.toggle("picked", ui.picked.has(cover.id)); }
+      else openViewer(items, items.indexOf(cover));
+    };
+    holdToSelect(coverEl, cover.id);
     const grid = $(".grid", sec);
     for (const it of list) {
       if (it === cover) continue;
       const t = el(`<div class="tile ${ui.picked.has(it.id) ? "picked" : ""} ${it.rot ? "rot" + it.rot : ""}">${it.video ? `<span class="chip">${svg("video")}${fmtDur(it.duration)}</span>` : ""}${it.fav ? `<svg class="heart" viewBox="0 0 24 24" fill="#fff"><path d="${ICON.heart}"/></svg>` : ""}${ui.selecting ? `<span class="sel"></span>` : ""}</div>`);
       t.prepend(lazyImg(it, 400));
       t.onclick = () => {
-        if (ui.selecting) { ui.picked.has(it.id) ? ui.picked.delete(it.id) : ui.picked.add(it.id); t.classList.toggle("picked"); $(".topbar .grow span")?.replaceChildren(document.createTextNode(ui.picked.size ? ui.picked.size + " selected" : "Select items")); renderSelectionTray(); }
+        if (ui.selecting) { togglePick(it.id); t.classList.toggle("picked", ui.picked.has(it.id)); }
         else openViewer(items, items.indexOf(it));
       };
+      holdToSelect(t, it.id);
       grid.append(t);
     }
     main.append(sec);
@@ -666,6 +685,7 @@ function renderAlbum() {
 
   // Which month is on screen: highlight it in the capsule.
   const monthObs = new IntersectionObserver((es) => {
+    if ((ui.pinned || 0) > Date.now()) return;
     for (const e of es) if (e.isIntersecting) {
       const k = Number(e.target.dataset.k);
       if (Math.floor(k / 100) !== ui.year) { ui.year = Math.floor(k / 100); const y = $("#year"); if (y) y.firstChild.textContent = ui.year; }
@@ -674,6 +694,38 @@ function renderAlbum() {
     }
   }, { rootMargin: "-30% 0px -60% 0px" });
   main.querySelectorAll(".month").forEach((s) => monthObs.observe(s));
+  // Once: how to select, now there's no Select button.
+  if (!store.get("selectTip") && items.length > 1) { store.set("selectTip", true); setTimeout(() => toast("Tip: hold a photo to select several."), 1200); }
+}
+
+function filtering() { return ui.kind !== "both" || ui.show !== "all"; }
+
+function togglePick(id) {
+  ui.picked.has(id) ? ui.picked.delete(id) : ui.picked.add(id);
+  $(".topbar .grow span")?.replaceChildren(document.createTextNode(ui.picked.size ? ui.picked.size + " selected" : "Select items"));
+  renderSelectionTray();
+}
+
+/** Hold a photo (about half a second) to start selecting, with it already picked. */
+function holdToSelect(node, id) {
+  let timer = null, x = 0, y = 0, held = false;
+  const stop = () => { clearTimeout(timer); timer = null; };
+  node.addEventListener("pointerdown", (e) => {
+    if (ui.selecting) return;
+    held = false; x = e.clientX; y = e.clientY;
+    timer = setTimeout(() => {
+      held = true; timer = null;
+      navigator.vibrate?.(10);
+      const keep = scrollY;
+      ui.selecting = true; ui.picked.clear(); ui.picked.add(id);
+      render(); scrollTo(0, keep); renderSelectionTray();
+    }, 480);
+  });
+  node.addEventListener("pointermove", (e) => { if (timer && Math.hypot(e.clientX - x, e.clientY - y) > 10) stop(); });
+  ["pointerup", "pointercancel", "pointerleave"].forEach((ev) => node.addEventListener(ev, stop));
+  node.addEventListener("contextmenu", (e) => e.preventDefault());
+  // The tap that ends a hold doesn't also open or toggle it.
+  node.addEventListener("click", (e) => { if (held) { held = false; e.stopImmediatePropagation(); e.preventDefault(); } }, true);
 }
 
 function renderSelectionTray() {
@@ -686,26 +738,34 @@ function renderSelectionTray() {
   root.append(tray);
 }
 
-function filterMenu(anchor) {
-  const set = (k, v) => { ui[k] = v; store.set(k, v); render(); };
-  openMenu(anchor, [
-    { label: "Photos and videos", on: ui.kind === "both", run: () => set("kind", "both") },
-    { label: "Photos only", on: ui.kind === "photos", run: () => set("kind", "photos") },
-    { label: "Videos only", on: ui.kind === "videos", run: () => set("kind", "videos") },
-    "-",
-    { label: "Everything", on: ui.show === "all", run: () => set("show", "all") },
-    { label: "Liked", on: ui.show === "liked", run: () => set("show", "liked") },
-    { label: "Favourites", on: ui.show === "fav", run: () => set("show", "fav") },
-    { label: "Disliked", on: ui.show === "disliked", run: () => set("show", "disliked") },
-    { label: "Not sorted yet", on: ui.show === "unsorted", run: () => set("show", "unsorted") },
-    "-",
-    { label: "Bigger squares", run: () => set("cols", Math.max(2, ui.cols - 1)) },
-    { label: "Smaller squares", run: () => set("cols", Math.min(6, ui.cols + 1)) },
-  ]);
+/** The filter, as a sheet: what to show and how it's sorted, then "Show N" (with a live count). */
+function filterMenu() {
+  const draft = { kind: ui.kind, show: ui.show };
+  const count = () => state.items.filter((i) => !i.montage && keep(i, draft)).length;
+  const row = (key, opts) => `<div class="seg" data-key="${key}">${opts.map(([v, l]) => `<button data-v="${v}" class="${draft[key] === v ? "on" : ""}">${l}</button>`).join("")}</div>`;
+  const sheet = openSheet(`<div class="filter-sheet"><h2>Filter</h2>
+    <div class="label">Show</div>${row("kind", [["both", "All"], ["photos", "Photos"], ["videos", "Videos"]])}
+    <div class="label">Sorted</div><div class="chips" data-key="show">${[["all", "Everything"], ["liked", "Liked"], ["fav", "Favourites"], ["disliked", "Disliked"], ["unsorted", "Not sorted yet"]].map(([v, l]) => `<button data-v="${v}" class="${draft.show === v ? "on" : ""}">${l}</button>`).join("")}</div>
+    <div class="label">Square size</div><div class="seg"><button id="bigger">Bigger</button><button id="smaller">Smaller</button></div>
+    <div class="actions"><button class="btn secondary" id="clear">Clear all</button><button class="btn" id="apply"></button></div></div>`);
+  const sync = () => {
+    sheet.querySelectorAll("[data-key]").forEach((g) => g.querySelectorAll("button").forEach((b) => b.classList.toggle("on", draft[g.dataset.key] === b.dataset.v)));
+    const n = count();
+    $("#apply", sheet).textContent = n ? "Show " + n : "Nothing to show";
+    $("#clear", sheet).disabled = draft.kind === "both" && draft.show === "all";
+  };
+  sheet.querySelectorAll("[data-key] button").forEach((b) => (b.onclick = () => { draft[b.parentElement.dataset.key] = b.dataset.v; sync(); }));
+  $("#clear", sheet).onclick = () => { draft.kind = "both"; draft.show = "all"; sync(); };
+  const cols = (c) => { ui.cols = c; store.set("cols", c); document.documentElement.style.setProperty("--cols", c); };
+  $("#bigger", sheet).onclick = () => cols(Math.max(2, ui.cols - 1));
+  $("#smaller", sheet).onclick = () => cols(Math.min(6, ui.cols + 1));
+  $("#apply", sheet).onclick = () => { ui.kind = draft.kind; ui.show = draft.show; store.set("kind", ui.kind); store.set("show", ui.show); closeSheet(); render(); };
+  sync();
 }
 
 function renderMemories() {
-  const main = el(`<main style="padding-top:calc(var(--safe-top) + 24px)"><div class="page-title">Memories</div></main>`);
+  const main = el(`<main style="padding-top:calc(var(--safe-top) + 24px)"><div class="title-row"><div class="page-title">Memories</div><button class="round glass" id="msettings" aria-label="Settings">${svg("settings")}</button></div></main>`);
+  $("#msettings", main).onclick = () => { ui.tab = "settings"; scrollTo(0, 0); render(); };
   const now = new Date();
   const onThisDay = state.items.filter((i) => { const d = new Date(i.takenAt); return !i.montage && d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() < now.getFullYear(); });
   if (onThisDay.length) {
@@ -771,7 +831,7 @@ function openMenu(anchor, entries) {
   const menu = el(`<div class="menu"></div>`);
   for (const e of entries) {
     if (e === "-") { menu.append(el("<hr>")); continue; }
-    const b = el(`<button style="${e.danger ? "color:var(--danger)" : ""}">${e.icon ? svg(e.icon) : ""}<span>${esc(e.label)}</span>${e.on ? `<span class="tick">${svg("check")}</span>` : ""}</button>`);
+    const b = el(`<button class="${e.on ? "on" : ""}" style="${e.danger ? "color:var(--danger)" : ""}">${e.icon ? svg(e.icon) : ""}<span>${esc(e.label)}</span>${e.on ? `<span class="tick">${svg("check")}</span>` : ""}</button>`);
     b.onclick = () => { closeMenus(); e.run(); };
     menu.append(b);
   }
@@ -836,11 +896,16 @@ const covers = {
   queue: Promise.resolve(),
 };
 function montageCover(item, img) {
-  const key = "mcover-" + item.id;
-  const show = (url) => { covers.urls.set(item.id, url); img.src = url; };
-  if (covers.urls.has(item.id)) return show(covers.urls.get(item.id));
+  if (covers.urls.has(item.id)) { img.src = covers.urls.get(item.id); return; }
   // Drive's preview first (better than nothing), then the proper cover once it's made.
   thumbs.load(item, img, 600);
+  ownPicture(item, img);
+}
+/** The app's own clear picture from inside a video (the brightest of a few moments), kept for next time. */
+function ownPicture(item, img) {
+  const key = "mcover-" + item.id;
+  const show = (url) => { covers.urls.set(item.id, url); img.src = url; img.classList.add("ready"); };
+  if (covers.urls.has(item.id)) return show(covers.urls.get(item.id));
   covers.queue = covers.queue.then(async () => {
     try {
       const c = await caches.open("moeski-covers-v1");

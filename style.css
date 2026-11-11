@@ -139,3 +139,33 @@ svg.chev { transform: rotate(-90deg); color: var(--muted); }
 .rot90 img, .rot90 video { transform: rotate(90deg); } .rot180 img, .rot180 video { transform: rotate(180deg); } .rot270 img, .rot270 video { transform: rotate(270deg); }
 .cover.rot90 img, .cover.rot270 img { scale: 1.09; }
 .viewer .stage.rot90 img, .viewer .stage.rot90 video, .viewer .stage.rot270 img, .viewer .stage.rot270 video { max-width: 100vh; max-height: 100vw; }
+
+/* ---- album: no Select button, a dot on the filter while it's on, clearer ticks ---- */
+.spacer2 { width: 96px; flex: none; }
+.round.dot::after { content: ""; position: absolute; top: 7px; right: 7px; width: 10px; height: 10px; border-radius: 50%; background: #0a84ff; box-shadow: 0 0 0 1.5px #1c1c1e; }
+.tile.picked img, .cover.picked img { filter: brightness(.7); }
+.tile.picked { outline: 2.5px solid #fff; outline-offset: -2.5px; }
+.cover .sel.big { position: absolute; top: 16px; left: 16px; width: 30px; height: 30px; border-radius: 50%; border: 2px solid #fff; background: rgba(0,0,0,.25); z-index: 2; }
+.cover.picked { outline: 3px solid #fff; outline-offset: -3px; }
+.cover.picked .sel.big { background: #fff; }
+.cover.picked .sel.big::after { content: ""; position: absolute; left: 9px; top: 4px; width: 7px; height: 14px; border: solid #111; border-width: 0 3px 3px 0; transform: rotate(45deg); }
+.tile, .cover { -webkit-touch-callout: none; user-select: none; -webkit-user-select: none; }
+.title-row { display: flex; align-items: center; justify-content: space-between; padding-right: 16px; }
+
+/* ---- one drop-down style everywhere: frosted, rounded, the chosen one softly lit ---- */
+.menu { background: rgba(44,44,46,.92); -webkit-backdrop-filter: blur(24px) saturate(1.4); backdrop-filter: blur(24px) saturate(1.4); border-radius: 20px; padding: 6px; animation: menu-in .16s ease-out; transform-origin: top right; }
+.menu button { border-radius: 12px; }
+.menu button.on { background: rgba(255,255,255,.1); }
+.menu button:active { background: rgba(255,255,255,.14); }
+@keyframes menu-in { from { opacity: 0; transform: scale(.92); } to { opacity: 1; transform: none; } }
+
+/* ---- the filter sheet ---- */
+.filter-sheet .label { color: var(--muted); font-size: 14px; margin: 16px 0 8px; }
+.seg { display: flex; gap: 4px; padding: 4px; border-radius: 24px; background: var(--card-2); }
+.seg button { flex: 1; height: 40px; border-radius: 20px; color: var(--muted); }
+.seg button.on { background: rgba(255,255,255,.1); color: var(--text); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chips button { height: 40px; padding: 0 16px; border-radius: 20px; background: var(--card-2); color: var(--muted); }
+.chips button.on { background: rgba(255,255,255,.14); color: var(--text); box-shadow: inset 0 0 0 .5px rgba(255,255,255,.2); }
+.filter-sheet .actions { display: flex; justify-content: space-between; gap: 12px; margin-top: 22px; }
+.filter-sheet .actions .btn:disabled { opacity: .4; }
