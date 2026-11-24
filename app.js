@@ -9,7 +9,7 @@ const WIDE = "https://www.googleapis.com/auth/drive";
 const API = "https://www.googleapis.com/drive/v3";
 const REDIRECT = location.origin + location.pathname.replace(/index\.html$/, "");
 const GRID = 12, MIN_SIMILARITY = 0.88, WINDOW_MS = 3 * 60 * 1000;
-const VERSION = "1.1";
+const VERSION = "1.2";
 
 // ---------- small helpers ----------
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -632,7 +632,7 @@ function renderAlbum() {
   } else {
     $("#settings", top).onclick = () => { ui.tab = "settings"; scrollTo(0, 0); render(); };
     $("#filter", top).onclick = (e) => filterMenu(e.currentTarget);
-    $("#year", top).onclick = (e) => years.length > 1 && openMenu(e.currentTarget, years.map((y) => ({ label: String(y), on: y === ui.year, run: () => { ui.year = y; const k = keys.find((x) => Math.floor(x / 100) === y); render(); document.getElementById("m" + k)?.scrollIntoView(); } })));
+    $("#year", top).onclick = (e) => years.length > 1 && openMenu(e.currentTarget, years.map((y) => ({ label: `${y}  ·  ${visible().filter((i) => new Date(i.takenAt).getFullYear() === y).length}`, on: y === ui.year, run: () => { ui.year = y; const k = keys.find((x) => Math.floor(x / 100) === y); render(); document.getElementById("m" + k)?.scrollIntoView(); } })));
     // Tapping a month: it lights up straight away and the capsule holds still while the album scrolls there.
     top.querySelectorAll("#months button").forEach((b) => (b.onclick = () => {
       top.querySelectorAll("#months button").forEach((x) => x.classList.toggle("on", x === b));
@@ -838,7 +838,11 @@ function openMenu(anchor, entries) {
   scrim.onclick = closeMenus;
   document.body.append(scrim, menu);
   const r = anchor.getBoundingClientRect();
-  const left = Math.min(Math.max(8, r.right - menu.offsetWidth), innerWidth - menu.offsetWidth - 8);
+  // Centred under a button in the middle (the year); otherwise lined up with the button's nearer edge.
+  const central = Math.abs(r.left + r.width / 2 - innerWidth / 2) < innerWidth / 6;
+  const want = central ? r.left + r.width / 2 - menu.offsetWidth / 2 : r.left + r.width / 2 > innerWidth / 2 ? r.right - menu.offsetWidth : r.left;
+  menu.style.transformOrigin = central ? "top center" : r.left + r.width / 2 > innerWidth / 2 ? "top right" : "top left";
+  const left = Math.min(Math.max(8, want), innerWidth - menu.offsetWidth - 8);
   const top = r.bottom + 8 + menu.offsetHeight > innerHeight ? Math.max(8, r.top - menu.offsetHeight - 8) : r.bottom + 8;
   Object.assign(menu.style, { left: left + "px", top: top + "px" });
 }
